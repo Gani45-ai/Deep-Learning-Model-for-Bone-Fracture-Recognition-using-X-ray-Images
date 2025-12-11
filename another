@@ -1,0 +1,975 @@
+# --- Imports ---
+from flask import Flask, render_template, send_file, redirect, request, session, url_for, flash, jsonify
+import os
+import json
+import base64
+
+import string
+import fitz
+import random
+from mistralai import Mistral
+import mysql.connector
+import requests
+import shutil
+from datetime import timedelta # Import timedelta
+
+import googleapiclient.discovery
+import googleapiclient.errors # Corrected typo here
+import json
+
+app = Flask(__name__)
+
+
+app.secret_key = "Qazwsx@123"
+
+
+
+try:
+    link = mysql.connector.connect(
+        host='localhost',
+        user='root',
+        password='',
+        database='skillgap_2025'
+    )
+    print("Database connection successful")
+except mysql.connector.Error as err:
+    print(f"FATAL: Error connecting to database: {err}")
+    print("Authentication features will fail. Please check DB connection details and ensure MySQL is running.")
+    link = None
+
+
+mistral_api_key = "WTuMOibXWmpTqjvscYHSaaCOjjXCakkJ"
+mistral_model = "pixtral-large-2411"
+try:
+    client = Mistral(api_key=mistral_api_key)
+    print("Mistral client initialized")
+except Exception as e:
+    print(f"FATAL: Error initializing Mistral client: {e}")
+    client = None
+
+
+ADZUNA_APP_ID = "b03f76e8"
+ADZUNA_APP_KEY = "3aba17aaa08c6bd408d4f71350fa835a"
+
+# --- Global YouTube API Configuration and Client ---
+YOUTUBE_API_KEY = "AIzaSyAfUerSBmlyAtJaA_MYQMswD3IZWNeydkA" # Replace with your actual key
+youtube = None # Initialize YouTube service client
+
+try:
+    # Build the YouTube service object once on startup
+    youtube = googleapiclient.discovery.build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
+    print("YouTube API client built successfully.")
+except Exception as build_error:
+    print(f"FATAL: Error building YouTube API client. Please check your API key and setup: {build_error}")
+    youtube = None # Ensure youtube is None if build fails
+
+
+@app.after_request
+def add_header(response):
+    """Add headers to prevent caching."""
+    response.cache_control.no_store = True
+    return response
+
+
+
+
+def encode_image(image_filepath):
+    """Reads an image file and returns its Base64 encoded string."""
+    try:
+        with open(image_filepath, "rb") as f:
+            return base64.b64encode(f.read()).decode("utf-8")
+    except Exception as e:
+        print(f"Error encoding image {image_filepath}: {e}")
+        return None
+
+
+
+
+def pdf_to_images(pdf_filepath, output_folder):
+    """Converts each page of a PDF to a PNG image."""
+    output_images = []
+    try:
+        doc = fitz.open(pdf_filepath)
+        pdf_basename = os.path.splitext(os.path.basename(pdf_filepath))[0]
+        zoom = 2
+        mat = fitz.Matrix(zoom, zoom)
+        print(f"Processing PDF: {os.path.basename(pdf_filepath)}, Pages: {len(doc)}")
+        for page_num in range(len(doc)):
+            page = doc.load_page(page_num)
+            pix = page.get_pixmap(matrix=mat)
+
+
+            image_filename = f"page_{page_num+1}.png"
+            image_filepath = os.path.join(output_folder, image_filename)
+            pix.save(image_filepath)
+            output_images.append(image_filepath)
+        doc.close()
+        print(f"Converted PDF to {len(output_images)} images in {output_folder}")
+    except Exception as e:
+        print(f"Error converting PDF {pdf_filepath} to images: {e}")
+    return output_images
+
+def extract_keywords_from_image(image_filepath):
+    """Uses Mistral API to extract skills/keywords from a resume image."""
+    if not client:
+        print("Mistral client not initialized. Cannot extract keywords.")
+        return []
+
+
+    image_base64 = encode_image(image_filepath)
+    if not image_base64:
+        return []
+
+    prompt = (
+        "Analyze this resume image. Extract key skills, technologies, programming languages, frameworks, "
+        "and potential job titles mentioned. Return ONLY a JSON object with a single key 'keywords' "
+        "containing a list of strings. Only include relevant terms for job searching. "
+        "Example: {\"keywords\": [\"Python\", \"Java\", \"SQL\", \"Data Analysis\", \"Software Engineer\", \"AWS\", \"Project Management\"]}"
+    )
+    messages = [{"role": "user","content": [{"type": "text", "text": prompt},{"type": "image_url", "image_url": f"data:image/png;base64,{image_base64}"}]}]
+    try:
+        chat_response = client.chat.complete(
+            model=mistral_model,
+            messages=messages,
+            response_format={"type": "json_object"}
+        )
+        extracted_text = chat_response.choices[0].message.content
+
+
+        try:
+            result = json.loads(extracted_text)
+            keywords = result.get("keywords", [])
+            if isinstance(keywords, list):
+
+
+                 return keywords
+            else:
+                print(f"Warning: 'keywords' field in Mistral response is not a list for {os.path.basename(image_filepath)}.")
+                return []
+        except json.JSONDecodeError as json_e:
+
+
+            print(f"Warning: Could not directly parse keyword JSON for {os.path.basename(image_filepath)}. Trying manual extraction. Error: {json_e}")
+            try:
+                data_start = extracted_text.find("{")
+                data_end = extracted_text.rfind("}") + 1
+                if data_start != -1 and data_end != -1:
+                    json_data_str = extracted_text[data_start:data_end]
+                    result = json.loads(json_data_str)
+                    keywords = result.get("keywords", [])
+                    if isinstance(keywords, list):
+                        return keywords
+                    else: return []
+                else: return []
+            except Exception as fallback_e:
+                 print(f"Fallback JSON extraction failed for keywords: {fallback_e}")
+                 return []
+        except Exception as e:
+             print(f"Error processing Mistral keyword response content: {e}")
+             return []
+    except Exception as e:
+        print(f"Error during Mistral API call for keywords on {image_filepath}: {e}")
+        return []
+
+
+
+@app.route('/')
+def index():
+    if 'user' in session:
+        return redirect(url_for('userhome'))
+
+
+    return render_template('index.html')
+
+
+
+
+@app.route('/ulogin', methods=['GET', 'POST'])
+def ulogin():
+
+
+    if not link or not link.is_connected():
+        flash('Database connection failed. Please contact admin.', 'error')
+        return render_template('ulogin.html', error=True)
+
+
+    if 'user' in session:
+        return redirect(url_for('userhome'))
+
+    if request.method == "GET":
+        success = request.args.get('success', False)
+        return render_template('ulogin.html', success=success)
+
+
+    cursor = None
+    try:
+        cursor = link.cursor(dictionary=True)
+        email = request.form.get("email")
+        password = request.form.get("password")
+
+        if not email or not password:
+             flash('Email and password are required.', 'warning')
+             return render_template('ulogin.html', error=True)
+
+
+
+        cursor.execute("SELECT uid, name FROM skillgap_2025_user WHERE email = %s AND password = %s", (email, password))
+        user = cursor.fetchone()
+
+        if user:
+            session['user'] = user['uid']
+            session['username'] = user['name']
+            session.permanent = True
+            app.permanent_session_lifetime = timedelta(days=7)
+            print(f"Login successful for user: {session['username']} ({session['user']})")
+            return redirect(url_for('userhome'))
+        else:
+            print(f"Login failed for email: {email}")
+            flash('Invalid email or password.', 'error')
+            return render_template('ulogin.html', error=True)
+        
+    except mysql.connector.Error as db_err:
+        print(f"Login DB error: {db_err}")
+        flash('Database error during login. Please try again later.', 'error')
+        return render_template('ulogin.html', error=True)
+    except Exception as e:
+        print(f"Login general error: {e}")
+        flash('An unexpected error occurred. Please try again.', 'error')
+        return render_template('ulogin.html', error=True)
+    finally:
+        if cursor: cursor.close()
+
+
+@app.route('/uregister', methods=['GET', 'POST'])
+def uregister():
+    if not link or not link.is_connected():
+        flash('Database connection failed. Please contact admin.', 'error')
+        return render_template('uregister.html', error=True)
+
+    if 'user' in session:
+        return redirect(url_for('userhome'))
+
+    if request.method == "GET":
+        return render_template('uregister.html')
+
+
+    cursor = None
+    try:
+        cursor = link.cursor()
+        name = request.form.get("name")
+        email = request.form.get("email")
+        password = request.form.get("password")
+        phone = request.form.get("phone")
+
+
+        if not all([name, email, password, phone]):
+             flash('All fields are required.', 'warning')
+             return render_template('uregister.html', error=True)
+
+
+
+        cursor.execute("SELECT email FROM skillgap_2025_user WHERE email = %s", (email,))
+        if cursor.fetchone():
+            print(f"Registration attempt failed: User exists {email}")
+            flash('User with this email already exists. Please login or use a different email.', category='exists')
+            return render_template('uregister.html', exists=True)
+        else:
+
+            uid_val = 'user_' + ''.join(random.choices(string.ascii_letters + string.digits, k=10))
+            insert_sql = "INSERT INTO skillgap_2025_user (uid, name, email, password, phone) VALUES (%s, %s, %s, %s, %s)"
+
+            cursor.execute(insert_sql, (uid_val, name, email, password, phone))
+
+            link.commit()
+            print(f"Registration successful for: {name} ({email})")
+            flash('Registration successful! Please login.', 'success')
+            return redirect(url_for('ulogin', success=True))
+
+    except mysql.connector.Error as db_err:
+        print(f"Registration DB error: {db_err}")
+        link.rollback()
+        flash('Database error during registration. Please try again.', 'error')
+        return render_template('uregister.html', error=True)
+    except Exception as e:
+        print(f"Registration general error: {e}")
+        link.rollback()
+        flash('An unexpected error occurred during registration.', 'error')
+        return render_template('uregister.html', error=True)
+    finally:
+        if cursor: cursor.close()
+
+@app.route('/userhome', methods=['GET'])
+def userhome():
+    if 'user' not in session:
+        flash("Please login to access your home page.", "warning")
+        return redirect(url_for('ulogin'))
+
+    return render_template('userhome.html', username=session.get('username', 'User'))
+
+@app.route('/ulogout')
+def ulogout():
+    print(f"Logging out user: {session.get('username', 'N/A')} ({session.get('user', 'N/A')})")
+    session.pop('user', None)
+    session.pop('username', None)
+    flash('You have been logged out successfully.', 'info')
+    return redirect(url_for('ulogin'))
+
+
+@app.route('/upload', methods=["GET", "POST"])
+def upload():
+
+
+    if 'user' not in session:
+        flash("Please login to upload a resume.", "warning")
+        return redirect(url_for('ulogin'))
+
+
+    if request.method == "GET":
+
+        return render_template('upload.html', job_results=None, video_tutorials=None, keywords_found=None)
+
+
+    if 'file' not in request.files:
+        flash("No file part in the request.", "error")
+        return redirect(request.url)
+    file = request.files['file']
+    if file.filename == '':
+        flash("No file selected.", "error")
+        return redirect(request.url)
+    if not file.filename.lower().endswith('.pdf'):
+        flash("Invalid file type. Please upload a PDF file.", "error")
+        return redirect(request.url)
+
+
+    processing_uid = 'proc_' + ''.join(random.choices(string.ascii_letters + string.digits, k=12))
+    base_folder = os.path.join("workspace", processing_uid)
+    pdf_folder = os.path.join(base_folder, "pdf")
+    image_folder = os.path.join(base_folder, "images")
+    os.makedirs(pdf_folder, exist_ok=True)
+    os.makedirs(image_folder, exist_ok=True)
+    print(f"Workspace created: {base_folder}")
+
+    pdf_filepath = os.path.join(pdf_folder, file.filename)
+
+
+    job_results = []
+    video_tutorials = {}
+    final_keywords = []
+
+    try:
+
+        file.save(pdf_filepath)
+        print(f"Saved uploaded resume: {pdf_filepath}")
+        page_images = pdf_to_images(pdf_filepath, image_folder)
+        if not page_images:
+             raise ValueError("Failed to convert PDF to images.")
+
+
+        all_keywords = set()
+        if client:
+            print("Extracting keywords via Mistral...")
+            for img_path in page_images:
+                extracted_kw = extract_keywords_from_image(img_path)
+                if extracted_kw:
+                    cleaned_kw = {k.strip().lower() for k in extracted_kw if k.strip() and len(k) > 1}
+                    all_keywords.update(cleaned_kw)
+            final_keywords = sorted(list(all_keywords))
+        else:
+            print("Mistral client not available. Skipping keyword extraction.")
+            flash("AI client is not available, cannot extract keywords.", "warning")
+
+        if not final_keywords and client:
+             flash("Could not extract keywords from the resume. Results may be limited.", "warning")
+        elif final_keywords:
+             print(f"Final unique keywords extracted: {final_keywords}")
+
+
+        if final_keywords and ADZUNA_APP_ID != "YOUR_ADZUNA_APP_ID" and ADZUNA_APP_KEY != "YOUR_ADZUNA_APP_KEY":
+            location = "bengaluru"
+            results_count_adzuna = 1
+
+            k_jobs = min(len(final_keywords), 3)
+            keywords_for_jobs = random.sample(final_keywords, k_jobs)
+
+            print(f"Querying Adzuna for {len(keywords_for_jobs)} keywords: {keywords_for_jobs}...")
+            for keyword in keywords_for_jobs:
+                adzuna_url = (f"https://api.adzuna.com/v1/api/jobs/in/search/1?"
+                           f"app_id={ADZUNA_APP_ID}&app_key={ADZUNA_APP_KEY}"
+                           f"&results_per_page={results_count_adzuna}"
+                           f"&what={requests.utils.quote(keyword)}"
+                           f"&where={location}&content-type=application/json")
+                try:
+                    response = requests.get(adzuna_url, timeout=15)
+                    response.raise_for_status()
+                    job_data = response.json()
+                    current_jobs = job_data.get('results', [])
+                    if current_jobs:
+                        job_results.extend(current_jobs)
+
+                except requests.exceptions.Timeout:
+                    print(f"Adzuna API request timed out for keyword '{keyword}'")
+                except requests.exceptions.RequestException as req_e:
+                    print(f"Adzuna API request failed for keyword '{keyword}': {req_e}")
+                except json.JSONDecodeError as json_e:
+                    print(f"Failed to parse Adzuna JSON for keyword '{keyword}': {json_e}")
+        elif not final_keywords:
+             print("Skipping Adzuna job search: No keywords extracted.")
+        else:
+
+             if final_keywords:
+                 print("Adzuna credentials not configured. Skipping job search.")
+
+        print(f"Total aggregated job results found: {len(job_results)}")
+
+        # --- YouTube API Code Block for Upload ---
+        # This block remains here for the upload feature's video recommendations
+        upload_video_tutorials = {} # Use a different variable name to avoid conflict
+        results_count_tutorials_upload = 1 # Define results count for upload
+
+        if final_keywords and youtube: # Use the global youtube client
+            print(f"Preparing to query YouTube Data API for video tutorials for {len(final_keywords)} keywords (Upload feature)...")
+
+            temp_video_tutorials = {}
+            processed_keywords_count = 0
+
+            for keyword in final_keywords:
+                try:
+                    search_query = f"{keyword} tutorial"
+                    print(f" -> Searching YouTube for: '{search_query}'...")
+
+                    search_response = youtube.search().list( # Corrected call here
+                        q=search_query,
+                        part="id,snippet",
+                        maxResults=results_count_tutorials_upload, # Use upload specific count
+                        type="video",
+                        order="date"
+                    ).execute()
+
+                    tutorials_list = []
+                    for item in search_response.get("items", []):
+                        video_id = item["id"].get("videoId")
+                        video_title = item["snippet"].get("title")
+
+                        if video_id and video_title:
+                            video_link = f"https://www.youtube.com/watch?v={video_id}"
+                            tutorials_list.append({"title": video_title, "link": video_link})
+
+                    if tutorials_list:
+                        temp_video_tutorials[keyword.lower()] = tutorials_list
+                        print(f" -> Found {len(tutorials_list)} tutorial(s) for '{keyword}'.")
+                    else:
+                        print(f" -> No tutorials found for '{keyword}'.")
+
+                    processed_keywords_count += 1
+
+                except googleapiclient.errors.HttpError as http_error:
+                     print(f"HTTP error searching YouTube for '{keyword}': {http_error}")
+                except Exception as search_error:
+                    print(f"Error during Youtube search for '{keyword}': {search_error}")
+
+            upload_video_tutorials = temp_video_tutorials
+            print(f"Finished YouTube tutorial search for Upload feature. Processed {processed_keywords_count}/{len(final_keywords)} keywords.")
+
+        elif not final_keywords:
+            print("Skipping YouTube tutorial search for Upload feature: No keywords extracted.")
+        elif not youtube:
+             print("YouTube API client not available. Skipping tutorial search for Upload feature.")
+
+
+        # --- NO DB Logging for Upload ---
+
+        # --- Return results to the same template ---
+        print(f"Rendering template with {len(job_results)} jobs and tutorials for {len(upload_video_tutorials)} keywords.")
+
+        # Don't clean up immediately if user might want to download original later (if download_zip exists)
+        # Consider a separate cleanup mechanism or timed deletion
+
+        return render_template('upload.html',
+                               success='Processing successful!', # Success message
+                               job_results=job_results,         # List of job dicts
+                               video_tutorials=upload_video_tutorials, # Pass upload specific videos
+                               keywords_found=final_keywords)   # Pass all found keywords
+
+    except ValueError as ve: # Catch specific errors like PDF conversion failure
+         print(f"Value error during processing {processing_uid}: {ve}")
+         flash(f"Processing error: {ve}", "error")
+         # Clean up potentially partially created workspace
+         if os.path.exists(base_folder):
+             try: shutil.rmtree(base_folder)
+             except Exception as cleanup_error: print(f"Error cleaning up during ValueError: {cleanup_error}")
+         return redirect(url_for('upload'))
+    except Exception as e:
+        print(f"General error during upload processing {processing_uid}: {e}")
+        # Attempt cleanup even on general error
+        if os.path.exists(base_folder):
+             try: shutil.rmtree(base_folder)
+             except Exception as cleanup_error: print(f"Error cleaning up during general exception: {cleanup_error}")
+        flash(f"An unexpected error occurred during processing. Please try again.", "error")
+        return redirect(url_for('upload')) # Redirect back to upload page on error
+
+# --- Quiz Routes ---
+
+@app.route('/quiz_select', methods=['GET'])
+def quiz_select():
+    if 'user' not in session:
+        flash("Please login to take a quiz.", "warning")
+        return redirect(url_for('ulogin'))
+
+    if not link or not link.is_connected():
+        flash('Database connection failed. Cannot load quiz options.', 'error')
+        return redirect(url_for('userhome'))
+
+    cursor = None
+    available_segments = []
+    try:
+        cursor = link.cursor()
+        # Get distinct segments from the questions table
+        cursor.execute("SELECT DISTINCT segment FROM skillgap_2025_questions ORDER BY segment")
+        segments = cursor.fetchall()
+        available_segments = [segment[0] for segment in segments]
+
+    except mysql.connector.Error as db_err:
+        print(f"Quiz select DB error: {db_err}")
+        flash('Database error loading quiz options. Please try again.', 'error')
+        return redirect(url_for('userhome'))
+    except Exception as e:
+        print(f"Quiz select general error: {e}")
+        flash('An unexpected error occurred loading the quiz options.', 'error')
+        return redirect(url_for('userhome'))
+    finally:
+        if cursor: cursor.close()
+
+    return render_template('quiz_select.html', available_segments=available_segments)
+
+@app.route('/quiz_start', methods=['POST'])
+def quiz_start():
+    if 'user' not in session:
+        flash("Please login to take a quiz.", "warning")
+        return redirect(url_for('ulogin'))
+
+    segment = request.form.get('segment')
+    if not segment:
+        flash("Please select a valid quiz topic.", "warning")
+        return redirect(url_for('quiz_select'))
+
+    return redirect(url_for('quiz', segment=segment))
+
+@app.route('/quiz/<segment>', methods=['GET'])
+def quiz(segment):
+    if 'user' not in session:
+        flash("Please login to take a quiz.", "warning")
+        return redirect(url_for('ulogin'))
+
+    if not link or not link.is_connected():
+        flash('Database connection failed. Cannot load quiz.', 'error')
+        return redirect(url_for('userhome'))
+
+    cursor = None
+    questions = []
+    try:
+        cursor = link.cursor(dictionary=True)
+        # Fetch questions for the given segment
+        cursor.execute("SELECT uid, question_text, option_a, option_b, option_c, option_d, correct_answer FROM skillgap_2025_questions WHERE segment = %s", (segment,))
+        questions = cursor.fetchall()
+
+        if not questions:
+            flash(f"No questions found for segment: {segment}", "warning")
+            return redirect(url_for('quiz_select'))
+        
+        import random
+        questions = random.sample(questions, min(10, len(questions)))
+
+    except mysql.connector.Error as db_err:
+        print(f"Quiz load DB error for segment {segment}: {db_err}")
+        flash('Database error loading quiz questions. Please try again.', 'error')
+        return redirect(url_for('quiz_select'))
+    except Exception as e:
+        print(f"Quiz load general error for segment {segment}: {e}")
+        flash('An unexpected error occurred loading the quiz.', 'error')
+        return redirect(url_for('quiz_select'))
+    finally:
+        if cursor: cursor.close()
+
+    return render_template('quiz.html', segment=segment, questions=questions)
+
+@app.route('/submit_quiz', methods=['POST'])
+def submit_quiz():
+    if 'user' not in session:
+        flash("Please login to submit a quiz.", "warning")
+        return redirect(url_for('ulogin'))
+
+    if not link or not link.is_connected():
+        flash('Database connection failed. Cannot submit quiz.', 'error')
+        return redirect(url_for('userhome'))
+
+    user_uid = session['user']
+    segment = request.form.get('segment')
+    score = 0
+    total_questions = 0
+    result_id = None
+
+    cursor = None
+    try:
+        cursor = link.cursor()
+
+        # Insert into skillgap_2025_result
+        insert_result_sql = "INSERT INTO skillgap_2025_result (user_uid, segment, score) VALUES (%s, %s, %s)"
+        cursor.execute(insert_result_sql, (user_uid, segment, score)) # Insert with initial score 0
+        link.commit()
+        result_id = cursor.lastrowid # Get the ID of the newly inserted result
+
+        # Process submitted answers and insert into skillgap_2025_resultitems
+        insert_item_sql = "INSERT INTO skillgap_2025_resultitems (result_id, question_uid, correct_answer, user_answer) VALUES (%s, %s, %s, %s)"
+        result_items_data = []
+
+        # Iterate through form data to find answers
+        for key, value in request.form.items():
+            if key.startswith('answer_'):
+                question_uid = key.replace('answer_', '')
+                user_answer = value
+                correct_answer_key = f'question_{question_uid}_correct_answer'
+                correct_answer = request.form.get(correct_answer_key)
+
+                if correct_answer is not None:
+                    total_questions += 1
+                    if user_answer == correct_answer:
+                        score += 1
+                    result_items_data.append((result_id, question_uid, correct_answer, user_answer))
+                else:
+                    print(f"Warning: Correct answer not found for question UID {question_uid}")
+
+
+        if result_items_data:
+             cursor.executemany(insert_item_sql, result_items_data)
+             link.commit()
+
+        # Update the score in skillgap_2025_result
+        update_result_sql = "UPDATE skillgap_2025_result SET score = %s WHERE id = %s"
+        cursor.execute(update_result_sql, (score, result_id))
+        link.commit()
+
+        print(f"Quiz submitted for user {user_uid}, segment {segment}. Score: {score}/{total_questions}")
+
+        # Redirect to the result page
+        return redirect(url_for('result', result_id=result_id))
+
+    except mysql.connector.Error as db_err:
+        print(f"Quiz submission DB error: {db_err}")
+        link.rollback()
+        flash('Database error during quiz submission. Please try again.', 'error')
+        # Attempt to redirect back to quiz or home if submission failed
+        if segment:
+             return redirect(url_for('quiz_select'))
+        else:
+             return redirect(url_for('userhome'))
+    except Exception as e:
+        print(f"Quiz submission general error: {e}")
+        link.rollback()
+        flash('An unexpected error occurred during quiz submission.', 'error')
+        if segment:
+             return redirect(url_for('quiz_select'))
+        else:
+             return redirect(url_for('userhome'))
+    finally:
+        if cursor: cursor.close()
+
+
+@app.route('/result/<int:result_id>', methods=['GET'])
+def result(result_id):
+    if 'user' not in session:
+        flash("Please login to view quiz results.", "warning")
+        return redirect(url_for('ulogin'))
+
+    if not link or not link.is_connected():
+        flash('Database connection failed. Cannot load result.', 'error')
+        return redirect(url_for('userhome'))
+
+    cursor = None
+    result_data = None
+    total_questions = 0
+    recommended_videos = [] # Initialize recommended_videos as a list
+
+    try:
+        cursor = link.cursor(dictionary=True)
+
+        # Fetch result details
+        cursor.execute("SELECT segment, score FROM skillgap_2025_result WHERE id = %s AND user_uid = %s", (result_id, session['user']))
+        result_data = cursor.fetchone()
+
+        if not result_data:
+            flash("Result not found or you do not have permission to view it.", "error")
+            return redirect(url_for('userhome'))
+
+        # Count total questions for this result
+        cursor.execute("SELECT COUNT(*) AS total FROM skillgap_2025_resultitems WHERE result_id = %s", (result_id,))
+        count_row = cursor.fetchone()
+        if count_row:
+            total_questions = count_row['total']
+
+        # Calculate percentage score and determine number of videos
+        score = result_data['score']
+        segment = result_data['segment']
+        percentage_score = (score / total_questions) * 100 if total_questions > 0 else 0
+
+        num_videos = 0
+        if percentage_score < 50:
+            num_videos = 3
+        elif 50 <= percentage_score < 60:
+            num_videos = 2
+        elif 60 <= percentage_score < 80:
+            num_videos = 1
+        # 80-100% means num_videos remains 0
+
+        # Fetch recommended videos if needed and YouTube client is available
+        if num_videos > 0 and youtube: # Use the global youtube client
+            print(f"Fetching {num_videos} video tutorials for segment: {segment} (Quiz Result feature)...")
+            search_query = f"{segment} tutorial" # Use segment as the search query
+
+            try:
+                search_response = youtube.search().list( # Corrected call here
+                    q=search_query,
+                    part="id,snippet",
+                    maxResults=num_videos, # Use num_videos determined by score
+                    type="video",
+                    order="relevance" # Order by relevance for tutorials
+                ).execute()
+
+                tutorials_list = []
+                for item in search_response.get("items", []):
+                    video_id = item["id"].get("videoId")
+                    video_title = item["snippet"].get("title")
+
+                    if video_id and video_title:
+                        video_link = f"https://www.youtube.com/watch?v={video_id}"
+                        tutorials_list.append({"title": video_title, "link": video_link})
+
+                recommended_videos = tutorials_list # Assign the list of videos
+                print(f" -> Found {len(recommended_videos)} tutorial(s) for '{segment}'.")
+
+            except googleapiclient.errors.HttpError as http_error:
+                 print(f"HTTP error searching YouTube for '{segment}': {http_error}")
+                 flash("Could not fetch video recommendations.", "warning")
+            except Exception as search_error:
+                print(f"Error during Youtube search for '{segment}': {search_error}")
+                flash("Could not fetch video recommendations.", "warning")
+
+        elif num_videos > 0 and not youtube:
+             print("YouTube API client not available. Skipping tutorial search for quiz result.")
+             flash("AI client is not available, cannot fetch video recommendations.", "warning")
+
+
+    except mysql.connector.Error as db_err:
+        print(f"Result load DB error for result ID {result_id}: {db_err}")
+        flash('Database error loading result. Please try again.', 'error')
+        return redirect(url_for('userhome'))
+    except Exception as e:
+        print(f"Result load general error for result ID {result_id}: {e}")
+        flash('An unexpected error occurred loading the result.', 'error')
+        return redirect(url_for('userhome'))
+    finally:
+        if cursor: cursor.close()
+
+    if result_data:
+        return render_template('result.html',
+                               segment=segment, # Pass segment for template display
+                               score=score, # Pass raw score
+                               total_questions=total_questions,
+                               percentage_score=percentage_score, # Pass percentage
+                               recommended_videos=recommended_videos) # Pass list of videos
+    else:
+        # Should be caught by the not result_data check above, but as a fallback
+        flash("Could not retrieve result details.", "error")
+        return redirect(url_for('userhome'))
+
+# --- Quiz History Routes ---
+
+@app.route('/quizhistory', methods=['GET'])
+def quiz_history():
+    if 'user' not in session:
+        flash("Please login to view quiz history.", "warning")
+        return redirect(url_for('ulogin'))
+
+    if not link or not link.is_connected():
+        flash('Database connection failed. Cannot load quiz history.', 'error')
+        return redirect(url_for('userhome'))
+
+    user_uid = session['user']
+    quiz_results = []
+    cursor = None
+    try:
+        cursor = link.cursor(dictionary=True)
+        # Fetch all quiz results for the logged-in user, ordered by timestamp
+        cursor.execute("SELECT id, segment, score, timestamp FROM skillgap_2025_result WHERE user_uid = %s ORDER BY timestamp DESC", (user_uid,))
+        quiz_results = cursor.fetchall()
+
+    except mysql.connector.Error as db_err:
+        print(f"Quiz history load DB error for user {user_uid}: {db_err}")
+        flash('Database error loading quiz history. Please try again.', 'error')
+        return redirect(url_for('userhome'))
+    except Exception as e:
+        print(f"Quiz history load general error for user {user_uid}: {e}")
+        flash('An unexpected error occurred loading quiz history.', 'error')
+        return redirect(url_for('userhome'))
+    finally:
+        if cursor: cursor.close()
+
+    return render_template('quizhistory.html', quiz_results=quiz_results)
+
+@app.route('/quizitems/<int:result_id>', methods=['GET'])
+def quiz_items(result_id):
+    if 'user' not in session:
+        flash("Please login to view quiz details.", "warning")
+        return redirect(url_for('ulogin'))
+
+    if not link or not link.is_connected():
+        flash('Database connection failed. Cannot load quiz details.', 'error')
+        return redirect(url_for('quiz_history')) # Redirect back to history on DB error
+
+    user_uid = session['user']
+    quiz_items_data = []
+    result_exists = False
+    cursor = None
+    try:
+        cursor = link.cursor(dictionary=True)
+
+        # First, verify that the result_id belongs to the logged-in user
+        cursor.execute("SELECT id FROM skillgap_2025_result WHERE id = %s AND user_uid = %s", (result_id, user_uid))
+        if cursor.fetchone():
+            result_exists = True
+            # Fetch quiz items for the given result_id, joining with questions to get text
+            cursor.execute("""
+                SELECT
+                    qi.correct_answer,
+                    qi.user_answer,
+                    q.question_text
+                FROM skillgap_2025_resultitems qi
+                JOIN skillgap_2025_questions q ON qi.question_uid = q.uid
+                WHERE qi.result_id = %s
+            """, (result_id,))
+            quiz_items_data = cursor.fetchall()
+        else:
+            flash("Quiz result not found or you do not have permission to view it.", "error")
+            return redirect(url_for('quiz_history'))
+
+
+    except mysql.connector.Error as db_err:
+        print(f"Quiz items load DB error for result ID {result_id}: {db_err}")
+        flash('Database error loading quiz details. Please try again.', 'error')
+        return redirect(url_for('quiz_history'))
+    except Exception as e:
+        print(f"Quiz items load general error for result ID {result_id}: {e}")
+        flash('An unexpected error occurred loading quiz details.', 'error')
+        return redirect(url_for('quiz_history'))
+    finally:
+        if cursor: cursor.close()
+
+    # Only render if the result was found and belongs to the user
+    if result_exists:
+        return render_template('quizitems.html', result_id=result_id, quiz_items=quiz_items_data)
+    else:
+         # This case should be covered by the check inside the try block, but as a fallback
+         flash("Could not retrieve quiz details.", "error")
+         return redirect(url_for('quiz_history'))
+
+@app.route('/add_questions', methods=['GET', 'POST'])
+def add_questions():
+    if 'user' not in session:
+        flash("Please login to access this page.", "warning")
+        return redirect(url_for('ulogin'))
+
+    if not link or not link.is_connected():
+        flash('Database connection failed. Please contact admin.', 'error')
+        return render_template('add_questions.html', error='Database connection failed')
+
+    if request.method == 'GET':
+        return render_template('add_questions.html')
+
+    # Process the uploaded CSV file
+    if 'csv_file' not in request.files:
+        return render_template('add_questions.html', error='No file selected')
+    
+    csv_file = request.files['csv_file']
+    if csv_file.filename == '':
+        return render_template('add_questions.html', error='No file selected')
+    
+    if not csv_file.filename.lower().endswith('.csv'):
+        return render_template('add_questions.html', error='Only CSV files are allowed')
+
+    questions_added = []
+    cursor = None
+    try:
+        # Read CSV file
+        import csv
+        
+        # Read the file content
+        file_content = csv_file.read().decode('utf-8').splitlines()
+        csv_reader = csv.reader(file_content)
+        
+        # Skip the header row
+        next(csv_reader)
+        
+        # Process each row
+        cursor = link.cursor()
+        for row in csv_reader:
+            if len(row) < 8:  # Make sure row has enough columns
+                continue
+                
+            # Generate a unique ID for the question
+            uid_val = 'uid' + ''.join(random.choices(string.ascii_letters + string.digits, k=10))
+            
+            # Get values from CSV row (0-based index)
+            question_no = int(row[0])
+            question_text = row[1]
+            option_a = row[2]
+            option_b = row[3]
+            option_c = row[4]
+            option_d = row[5]
+            correct_answer = row[6]
+            segment = row[7]
+            
+            # Insert into database
+            insert_sql = """
+                INSERT INTO skillgap_2025_questions 
+                (uid, question_no, question_text, option_a, option_b, option_c, option_d, correct_answer, segment) 
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """
+            cursor.execute(insert_sql, (
+                uid_val, question_no, question_text, option_a, option_b, 
+                option_c, option_d, correct_answer, segment
+            ))
+            
+            # Add to list of added questions for display
+            questions_added.append({
+                'question_no': question_no,
+                'question_text': question_text,
+                'segment': segment
+            })
+        
+        link.commit()
+        print(f"Successfully added {len(questions_added)} questions")
+        
+        return render_template('add_questions.html', 
+                              success=f'Successfully added {len(questions_added)} questions', 
+                              questions_added=questions_added)
+            
+    except Exception as e:
+        print(f"Error: {e}")
+        if cursor and link:
+            link.rollback()
+        return render_template('add_questions.html', 
+                              error=f'Error: {e}')
+    finally:
+        if cursor:
+            cursor.close()
+
+# --- Main Execution Block ---
+if __name__ == "__main__":
+    # Create workspace directory if it doesn't exist globally
+    if not os.path.exists("workspace"):
+        os.makedirs("workspace")
+        print("Created workspace directory.")
+
+    # Ensure necessary DB tables exist (optional check or manual setup required)
+    # Add check here if desired: check_db_tables()
+
+    app.run(host='0.0.0.0', port=5000, debug=True) # Run on all interfaces, keep debug for dev

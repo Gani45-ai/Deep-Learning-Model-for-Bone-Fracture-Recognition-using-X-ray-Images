@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bone Fracture Detection</title>
+    <link rel="stylesheet" href="../static/css/bootstrap.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.1.1/css/all.min.css" />
+    <style>
+        .fracture-details {
+            white-space: pre-line;
+        }
+
+        .result-card {
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+        }
+
+        .image-container {
+            position: relative;
+            overflow: hidden;
+            max-height: 600px;
+        }
+
+        .image-container img {
+            width: 100%;
+            height: auto;
+            object-fit: contain;
+        }
+
+        .zoom-container {
+            position: relative;
+        }
+
+        .zoom-controls {
+            position: absolute;
+            bottom: 10px;
+            right: 10px;
+            z-index: 100;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="d-flex flex-column min-vh-100">
+        <nav class="navbar navbar-expand-lg bg-primary border-primary border-bottom">
+            <div class="container-fluid my-1 mx-5">
+                <a class="navbar-brand text-light fw-bold fs-5" href="#">
+                    <i class="fa-solid fa-x-ray"></i> BONE FRACTURE DETECTION</a>
+                <button class="navbar-toggler shadow-none border-0" type="button" data-bs-toggle="collapse"
+                    data-bs-target="#navbarSupportedContent" aria-controls="navbarSupportedContent"
+                    aria-expanded="false" aria-label="Toggle navigation">
+                    <i class="fa-solid fa-bars text-light"></i>
+                </button>
+                <div class="collapse navbar-collapse" id="navbarSupportedContent">
+                    <ul class="navbar-nav ms-auto mb-2 mb-lg-0 gap-1">
+                        <li class="nav-item">
+                            <a class="nav-link text-decoration-underline link-offset-2 active text-light fw-bold"
+                                aria-current="page" href="/enquiry">Detect Fracture</a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link text-white fw-bold" href="/doctors">Doctors</a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link text-white fw-bold" href="/logout">Logout</a>
+                        </li>
+                    </ul>
+                </div>
+            </div>
+        </nav>
+
+        <div class="container bg-white my-4">
+            <div class="d-flex mt-5 mb-3">
+                <h3 class="text-primary-emphasis link-offset-1 text-decoration-underline flex-grow-1 flex-md-grow-0">
+                    Bone Fracture Detection
+                </h3>
+            </div>
+
+            {% if error %}
+            <div class="alert alert-danger">{{ error }}</div>
+            {% endif %}
+
+            <div class="row justify-content-center mb-3 mt-4">
+                <div class="col-md-12">
+                    <form method="post" enctype="multipart/form-data" class="mb-4">
+                        <div class="mb-3">
+                            <label for="xrayImage" class="form-label">Upload X-ray Image:</label>
+                            <input type="file" class="form-control" id="xrayImage" name="file" accept="image/*"
+                                required>
+                            <small class="text-muted">Supported formats: JPG, JPEG, PNG</small>
+                        </div>
+                        <div class="d-flex justify-content-end">
+                            <button type="submit" class="btn btn-primary">Detect Fracture</button>
+                        </div>
+                    </form>
+
+                    {% if original_image %}
+                    <div class="row mb-4">
+                        <div class="col-md-3">
+                            <div class="card mb-3 result-card">
+                                <div class="card-header bg-primary text-white">
+                                    <i class="fa-solid fa-image"></i> Original X-ray
+                                </div>
+                                <div class="card-body p-0">
+                                    <div class="image-container">
+                                        <img src="{{ original_image }}" class="img-fluid" alt="Original X-ray"
+                                            id="originalImage">
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <div class="card mb-3 result-card">
+                                <div class="card-header bg-primary text-white">
+                                    <i class="fa-solid fa-adjust"></i> Thresholded
+                                </div>
+                                <div class="card-body p-0">
+                                    <div class="image-container">
+                                        <img src="{{ thresholded_image }}" class="img-fluid" alt="Thresholded X-ray">
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <div class="card mb-3 result-card">
+                                <div class="card-header bg-primary text-white">
+                                    <i class="fa-solid fa-toggle-on"></i> Binary
+                                </div>
+                                <div class="card-body p-0">
+                                    <div class="image-container">
+                                        <img src="{{ binary_image }}" class="img-fluid" alt="Binary X-ray">
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <div class="card mb-3 result-card">
+                                <div class="card-header bg-primary text-white">
+                                    <i class="fa-solid fa-eye-dropper"></i> Grayscale
+                                </div>
+                                <div class="card-body p-0">
+                                    <div class="image-container">
+                                        <img src="{{ grayscale_image }}" class="img-fluid" alt="Grayscale X-ray">
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="row mb-4">
+                        <div class="col-md-6">
+                            <div class="card result-card h-100">
+                                <div class="card-header bg-primary text-white">
+                                    <i class="fa-solid fa-clipboard-list"></i> Analysis Results
+                                </div>
+                                <div class="card-body">
+                                    <div class="fracture-details">{{ result }}</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="card result-card h-100">
+                                <div class="card-header bg-primary text-white">
+                                    <i class="fa-solid fa-microscope"></i> Detected Fractures
+                                </div>
+                                <div class="card-body p-0">
+                                    <div class="image-container">
+                                        <img src="{{ processed_image }}" class="img-fluid" alt="Processed X-ray"
+                                            id="processedImage">
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Floating Chatbot Button -->
+    <button class="btn btn-primary rounded-circle floating-chatbot-button" type="button" data-bs-toggle="modal" data-bs-target="#chatbotModal">
+        <i class="fa-solid fa-robot"></i>
+    </button>
+
+    <!-- Chatbot Modal -->
+    <div class="modal fade" id="chatbotModal" tabindex="-1" aria-labelledby="chatbotModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header bg-primary text-white">
+                    <h5 class="modal-title" id="chatbotModalLabel"><i class="fa-solid fa-robot"></i> Medical Chatbot (Bones Specialist)</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body" id="chatbox" style="height: 300px; overflow-y: scroll;">
+                    <!-- Chat messages will appear here -->
+                    <div class="mb-2">
+                        <strong>Bot:</strong> Hello! I am a medical chatbot specializing in bones. How can I help you today?
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <div class="input-group">
+                        <input type="text" id="chatInput" class="form-control" placeholder="Ask a question about bones...">
+                        <button class="btn btn-primary" id="sendChat">Send</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="../static/js/jquery.js"></script>
+    <script src="../static/js/bootstrap.js"></script>
+    <script>
+        function zoomImage(imageId, factor) {
+            const img = document.getElementById(imageId);
+            const currentWidth = img.width;
+            img.style.width = (currentWidth * factor) + 'px';
+        }
+
+        // Reset zoom when uploading new image
+        document.getElementById('xrayImage').addEventListener('change', function () {
+            const originalImg = document.getElementById('originalImage');
+            const processedImg = document.getElementById('processedImage');
+            if (originalImg) originalImg.style.width = '100%';
+            if (processedImg) processedImg.style.width = '100%';
+        });
+
+        // Chatbot functionality
+        $(document).ready(function() {
+            $('#sendChat').click(function() {
+                sendMessage();
+            });
+
+            $('#chatInput').keypress(function(event) {
+                if (event.which == 13) { // Enter key pressed
+                    sendMessage();
+                }
+            });
+
+            function sendMessage() {
+                const message = $('#chatInput').val();
+                if (message.trim() === '') return;
+
+                // Display user message
+                $('#chatbox').append('<div class="mb-2 text-end"><strong>You:</strong> ' + message + '</div>');
+                $('#chatInput').val('');
+                $('#chatbox').scrollTop($('#chatbox')[0].scrollHeight); // Scroll to bottom
+
+                // Send message to backend
+                $.ajax({
+                    url: '/chatbot',
+                    method: 'POST',
+                    contentType: 'application/json',
+                    data: JSON.stringify({ message: message }),
+                    success: function(data) {
+                        // Format and display bot response
+                        let botResponse = data.response;
+                        // Replace newline characters with <br> tags
+                        botResponse = botResponse.replace(/\n/g, '<br>');
+                        // Basic markdown for bold text (**text**)
+                        botResponse = botResponse.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+
+                        $('#chatbox').append('<div class="mb-2"><strong>Bot:</strong> ' + botResponse + '</div>');
+                        $('#chatbox').scrollTop($('#chatbox')[0].scrollHeight); // Scroll to bottom
+                    },
+                    error: function(error) {
+                        let errorMessage = 'Could not get response from chatbot.';
+                        if (error.responseJSON && error.responseJSON.error) {
+                            errorMessage = 'Bot Error: ' + error.responseJSON.error;
+                        } else {
+                            errorMessage = 'Bot Error: ' + error.statusText;
+                        }
+                        $('#chatbox').append('<div class="mb-2 text-danger">' + errorMessage + '</div>');
+                        $('#chatbox').scrollTop($('#chatbox')[0].scrollHeight); // Scroll to bottom
+                        console.error("Error calling chatbot API:", error);
+                    }
+                });
+            }
+        });
+    </script>
+    <style>
+        .floating-chatbot-button {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            z-index: 1000; /* Ensure it's above other content */
+            width: 60px;
+            height: 60px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.5rem;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+        }
+    </style>
+</body>
+
+</html>
